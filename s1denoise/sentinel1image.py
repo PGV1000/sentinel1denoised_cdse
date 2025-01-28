@@ -26,6 +26,12 @@ from s1denoise.utils import (
     parse_azimuth_time,
 )
 
+from cdsetool.query import query_features
+from cdsetool.download import download_features
+from cdsetool.credentials import Credentials
+from cdsetool.monitor import StatusMonitor
+
+
 SPEED_OF_LIGHT = 299792458.
 RADAR_FREQUENCY = 5.405000454334350e+09
 RADAR_WAVELENGTH = SPEED_OF_LIGHT / RADAR_FREQUENCY
@@ -85,39 +91,53 @@ class Sentinel1ImageXml:
         if not os.path.exists(self.aux_data_dir):
             os.makedirs(self.aux_data_dir)
 
-    def download_aux_calibration(self, filename):
-        """ Download AUX calibration file from APC """
-        self.auxiliaryCalibration_file = os.path.join(self.aux_data_dir, filename, 'data', '%s-aux-cal.xml' % self.platform.lower())
-        if os.path.exists(self.auxiliaryCalibration_file):
-            return
-        vs = filename.split('_')[3].lstrip('V')
-        validity_start = f'{vs[:4]}-{vs[4:6]}-{vs[6:8]}T{vs[9:11]}:{vs[11:13]}:{vs[13:15]}'
-        cd = filename.split('_')[4].lstrip('G')
-        creation_date = f'{cd[:4]}-{cd[4:6]}-{cd[6:8]}T{cd[9:11]}:{cd[11:13]}:{cd[13:15]}'
-        def get_remote_url(api_url):
-            with requests.get(api_url, stream=True) as r:
-                rjson = json.loads(r.content.decode())
-                remote_url = rjson['results'][0]['remote_url']
-                physical_name = rjson['results'][0]['physical_name']
-                return remote_url, physical_name
-        try:
-            remote_url, physical_name = get_remote_url(f'https://sar-mpc.eu/api/v1/?product_type=AUX_CAL&validity_start={validity_start}&creation_date={creation_date}')
-        except:
-            remote_url, physical_name = get_remote_url(f'https://sar-mpc.eu/api/v1/?product_type=AUX_CAL&validity_start={validity_start}')
 
-        download_file = os.path.join(self.aux_data_dir, physical_name)
-        print(f'downloading {filename}.zip from {remote_url}')
-        with requests.get(remote_url, stream=True) as r:
-            with open(download_file, "wb") as f:
-                f.write(r.content)
+def download_aux_calibration(self, filename, platform):
+    self.auxiliaryCalibration_file = os.path.join(self.aux_data_dir, filename, 'data', f'{platform}-aux-cal.xml')
+    if os.path.exists(self.auxiliaryCalibration_file):
+        return
 
-        with zipfile.ZipFile(download_file, 'r') as download_zip:
-            download_zip.extractall(path=self.aux_data_dir)
-        output_dir = f'{self.aux_data_dir}/{filename}'
-        if not os.path.exists(output_dir):
-            # in case the physical_name of the downloaded file does not exactly match the filename from manifest
-            # the best found AUX-CAL file is copied to the filename from manifest
-            shutil.copytree(download_file.rstrip('.zip'), output_dir)
+    # Разбор даты создания из имени файла
+    cd = filename.split('_')[4].lstrip('G')
+    creation_date = f'{cd[:4]}-{cd[4:6]}-{cd[6:8]}T{cd[9:11]}:{cd[11:13]}:{cd[13:15]}'
+
+    # Используем cdsetool для поиска файлов
+    features = query_features(
+        "Sentinel1",
+        {
+            "productType": "AUX_CAL",
+            "platform": platform,
+            "sortParam": "published",
+            "sortOrder": "desc",
+            "maxRecords": "1",
+            "publishedAfter": creation_date,
+        },
+    )
+
+    if not features:
+        raise ValueError("No AUX_CAL files found.")
+
+    # Скачиваем найденный файл
+    print(f'Downloading {filename}.zip...')
+    download_dir = self.aux_data_dir
+    downloaded_files = list(
+        download_features(
+            features,
+            download_dir,
+            {
+                "concurrency": 4,
+                "monitor": StatusMonitor(),
+                "credentials": Credentials("medvedevdg.corp@gmail.com", "46cMZ4f6/Jx!hp*"),
+            },
+        )
+    )
+
+    if downloaded_files:
+        print(f"Extracting {downloaded_files[0]}...")
+        subprocess.call(['unzip', downloaded_files[0], '-d', self.aux_data_dir])
+    else:
+        raise ValueError("Failed to download the AUX_CAL file.")
+
 
 
 class Sentinel1Image():
